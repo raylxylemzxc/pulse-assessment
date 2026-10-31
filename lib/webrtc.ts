@@ -5,6 +5,15 @@ export type PeerControl =
   | "video-decline"
   | "video-end";
 
+const MAX_CHAT_LENGTH = 4_000;
+const MAX_PENDING_CANDIDATES = 100;
+const VALID_CONTROLS: PeerControl[] = [
+  "video-request",
+  "video-accept",
+  "video-decline",
+  "video-end",
+];
+
 interface PeerCallbacks {
   onSignal: (type: DescType, payload: string) => void;
   onChat: (text: string) => void;
@@ -14,31 +23,9 @@ interface PeerCallbacks {
   onChannelOpen: () => void;
 }
 
-function getIceServers(): RTCIceServer[] {
-  const servers: RTCIceServer[] = [
-    { urls: "stun:stun.l.google.com:19302" },
-  ];
-
-  // TURN is needed when clients cannot establish a direct ICE path. TURN
-  // credentials are expected to be short-lived or scoped by the provider.
-  const turnUrls = process.env.NEXT_PUBLIC_TURN_URL
-    ?.split(",")
-    .map((url) => url.trim())
-    .filter(Boolean);
-  const turnUsername = process.env.NEXT_PUBLIC_TURN_USERNAME;
-  const turnCredential = process.env.NEXT_PUBLIC_TURN_CREDENTIAL;
-  if (turnUrls?.length && turnUsername && turnCredential) {
-    servers.push({
-      urls: turnUrls,
-      username: turnUsername,
-      credential: turnCredential,
-    });
-  }
-
-  return servers;
-}
-
-const ICE_CONFIG: RTCConfiguration = { iceServers: getIceServers() };
+const ICE_CONFIG: RTCConfiguration = {
+  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+};
 
 export class PeerSession {
   private pc: RTCPeerConnection;
@@ -101,9 +88,17 @@ export class PeerSession {
     dc.onmessage = (e) => {
       try {
         const msg = JSON.parse(e.data as string);
-        if (msg.t === "chat" && typeof msg.text === "string") {
+        if (
+          msg.t === "chat" &&
+          typeof msg.text === "string" &&
+          msg.text.length <= MAX_CHAT_LENGTH
+        ) {
           this.cb.onChat(msg.text);
-        } else if (msg.t === "ctrl" && typeof msg.ctrl === "string") {
+        } else if (
+          msg.t === "ctrl" &&
+          typeof msg.ctrl === "string" &&
+          VALID_CONTROLS.includes(msg.ctrl as PeerControl)
+        ) {
           this.cb.onControl(msg.ctrl as PeerControl);
         }
       } catch {}
@@ -124,7 +119,9 @@ export class PeerSession {
 
     if (type === "ice") {
       if (!this.pc.remoteDescription) {
-        this.pendingCandidates.push(data);
+        if (this.pendingCandidates.length < MAX_PENDING_CANDIDATES) {
+          this.pendingCandidates.push(data);
+        }
         return;
       }
       try {
@@ -141,8 +138,6 @@ export class PeerSession {
     if (this.ignoreOffer) return;
 
     await this.pc.setRemoteDescription(desc);
-    // Candidates can arrive before the offer/answer through polling, but the
-    // browser requires a remote description before addIceCandidate succeeds.
     await this.flushPendingCandidates();
     if (desc.type === "offer") {
       await this.pc.setLocalDescription();
@@ -164,7 +159,7 @@ export class PeerSession {
   }
 
   sendChat(text: string) {
-    this.safeSend({ t: "chat", text });
+    if (text.length <= MAX_CHAT_LENGTH) this.safeSend({ t: "chat", text });
   }
 
   sendControl(ctrl: PeerControl) {

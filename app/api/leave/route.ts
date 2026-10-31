@@ -1,5 +1,6 @@
 import type { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { isAuthorizedSession, isValidSessionId } from "@/lib/session";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -16,8 +17,8 @@ export async function POST(request: NextRequest) {
     id = undefined;
   }
 
-  if (typeof id !== "string" || !id) {
-    return Response.json({ error: "invalid id" }, { status: 400 });
+  if (!isValidSessionId(id) || !isAuthorizedSession(request, id)) {
+    return Response.json({ error: "unauthorized session" }, { status: 401 });
   }
 
   // Independent cleanup deletes — no atomicity needed (and interactive

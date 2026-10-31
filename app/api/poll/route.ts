@@ -2,6 +2,7 @@ import type { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { STALE_MS, SIGNAL_TTL_MS } from "@/lib/presence";
 import type { PollResponse } from "@/lib/types";
+import { isAuthorizedSession, isValidSessionId } from "@/lib/session";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,16 +14,16 @@ export async function GET(request: NextRequest) {
   const params = request.nextUrl.searchParams;
   const id = params.get("id");
 
-  if (!id) {
-    return Response.json({ error: "missing id" }, { status: 400 });
+  if (!isValidSessionId(id) || !isAuthorizedSession(request, id)) {
+    return Response.json({ error: "unauthorized session" }, { status: 401 });
   }
 
   const now = Date.now();
   const staleCutoff = new Date(now - STALE_MS);
   const signalCutoff = new Date(now - SIGNAL_TTL_MS);
 
-  // 1) Heartbeat — refresh lastSeen only for the caller.
-  await prisma.presence.update({
+  // 1) Heartbeat — refresh lastSeen for the caller.
+  await prisma.presence.updateMany({
     where: { id },
     data: { lastSeen: new Date(now) },
   });
@@ -60,14 +61,31 @@ export async function GET(request: NextRequest) {
       lng: p.lng,
       busy: p.busy,
     })),
-    signals: inbox.map((s) => ({
-      id: s.id,
-      fromId: s.fromId,
-      toId: s.toId,
-      type: s.type as PollResponse["signals"][number]["type"],
-      payload: s.payload,
-      createdAt: s.createdAt.toISOString(),
-    })),
+    signals: inbox.map((s) => {
+      let payload = s.payload;
+      let connectionToken: string | undefined;
+      try {
+        const envelope = payload ? JSON.parse(payload) : null;
+        if (
+          envelope &&
+          typeof envelope === "object" &&
+          typeof envelope.token === "string"
+        ) {
+          connectionToken = envelope.token;
+          payload = typeof envelope.payload === "string" ? envelope.payload : null;
+        }
+      } catch {}
+
+      return {
+        id: s.id,
+        fromId: s.fromId,
+        toId: s.toId,
+        type: s.type as PollResponse["signals"][number]["type"],
+        payload,
+        ...(connectionToken ? { connectionToken } : {}),
+        createdAt: s.createdAt.toISOString(),
+      };
+    }),
   };
 
   return Response.json(response);

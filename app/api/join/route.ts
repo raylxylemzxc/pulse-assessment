@@ -1,6 +1,12 @@
 import type { NextRequest } from "next/server";
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { applyPrivacyOffset, isValidLatLng } from "@/lib/geo";
+import {
+  isAuthorizedSession,
+  isValidSessionId,
+  withSessionCookie,
+} from "@/lib/session";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,11 +24,19 @@ export async function POST(request: NextRequest) {
 
   const { id, lat, lng } = (body ?? {}) as Record<string, unknown>;
 
-  if (typeof id !== "string" || id.length < 8 || id.length > 64) {
+  if (!isValidSessionId(id)) {
     return Response.json({ error: "invalid id" }, { status: 400 });
   }
   if (!isValidLatLng(lat, lng)) {
     return Response.json({ error: "invalid coordinates" }, { status: 400 });
+  }
+
+  const existing = await prisma.presence.findUnique({
+    where: { id },
+    select: { id: true },
+  });
+  if (existing && !isAuthorizedSession(request, id)) {
+    return Response.json({ error: "session is already owned" }, { status: 403 });
   }
 
   const offset = applyPrivacyOffset(lat as number, lng as number);
@@ -43,5 +57,5 @@ export async function POST(request: NextRequest) {
     },
   });
 
-  return Response.json({ ok: true });
+  return withSessionCookie(NextResponse.json({ ok: true }), id);
 }

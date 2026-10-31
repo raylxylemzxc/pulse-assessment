@@ -6,6 +6,8 @@ import WorldMap from "./components/WorldMap";
 import ConnectionPrompt from "./components/ConnectionPrompt";
 import ChatPanel, { type ChatMessage } from "./components/ChatPanel";
 import VideoPanel from "./components/VideoPanel";
+import FloatingChatHead from "./components/FloatingChatHead";
+import NearbyList from "./components/NearbyList";
 import { join, leave, poll, sendSignal } from "@/lib/api";
 import { PeerSession, type DescType, type PeerControl } from "@/lib/webrtc";
 import { POLL_INTERVAL_MS } from "@/lib/presence";
@@ -13,10 +15,10 @@ import { type PeerDot, type SignalMsg } from "@/lib/types";
 
 type Conn =
   | { kind: "idle" }
-  | { kind: "requesting"; peerId: string }
-  | { kind: "incoming"; peerId: string }
-  | { kind: "connecting"; peerId: string }
-  | { kind: "connected"; peerId: string };
+  | { kind: "requesting"; peerId: string; connectionToken?: string }
+  | { kind: "incoming"; peerId: string; connectionToken: string }
+  | { kind: "connecting"; peerId: string; connectionToken: string }
+  | { kind: "connected"; peerId: string; connectionToken: string };
 
 type VideoState = "none" | "requesting" | "incoming" | "active";
 
@@ -27,6 +29,10 @@ export default function Home() {
   const [sessionId] = useState(() => crypto.randomUUID());
   const [peers, setPeers] = useState<PeerDot[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [chatOpen, setChatOpen] = useState(true);
+  const chatOpenRef = useRef(true);
+  const [chatUnread, setChatUnread] = useState(0);
+  const [confirmingEnd, setConfirmingEnd] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
@@ -61,11 +67,24 @@ export default function Home() {
 
   function addMessage(mine: boolean, text: string) {
     setMessages((prev) => [...prev, { id: msgId.current++, mine, text }]);
+    if (!mine && !chatOpenRef.current) setChatUnread((count) => count + 1);
+  }
+
+  function openChat() {
+    chatOpenRef.current = true;
+    setChatOpen(true);
+    setChatUnread(0);
+  }
+
+  function closeChat() {
+    chatOpenRef.current = false;
+    setChatOpen(false);
   }
 
   function teardown(message?: string) {
     if (requestTimer.current) clearTimeout(requestTimer.current);
     if (disconnectTimer.current) clearTimeout(disconnectTimer.current);
+    disconnectTimer.current = null;
     peerRef.current?.close();
     peerRef.current = null;
     setLocalStream(null);
@@ -76,13 +95,11 @@ export default function Home() {
     if (message) showNotice(message);
   }
 
-  function startPeer(peerId: string, initiator: boolean) {
+  function startPeer(peerId: string, initiator: boolean, connectionToken: string) {
     const ps = new PeerSession(initiator, {
       onSignal: (type: DescType, payload: string) => {
-        void sendSignal(sessionId, peerId, type, payload).catch(() => {
-          if (connRef.current.kind !== "idle") {
-            teardown("Connection signaling failed.");
-          }
+        void sendSignal(sessionId, peerId, type, payload, connectionToken).catch(() => {
+          teardown("Connection signaling failed.");
         });
       },
       onChat: (text) => addMessage(false, text),
@@ -98,9 +115,15 @@ export default function Home() {
           if (!disconnectTimer.current) {
             disconnectTimer.current = setTimeout(() => {
               disconnectTimer.current = null;
-              const c = connRef.current;
-              if (c.kind === "connecting" || c.kind === "connected") {
-                void sendSignal(sessionId, c.peerId, "end");
+              const current = connRef.current;
+              if (current.kind === "connecting" || current.kind === "connected") {
+                void sendSignal(
+                  sessionId,
+                  current.peerId,
+                  "end",
+                  undefined,
+                  current.connectionToken,
+                );
                 teardown("Connection lost (network).");
               }
             }, 10_000);
@@ -108,15 +131,21 @@ export default function Home() {
           return;
         }
         if (state === "failed") {
-          const c = connRef.current;
-          if (c.kind === "connecting" || c.kind === "connected") {
-            void sendSignal(sessionId, c.peerId, "end");
+          const current = connRef.current;
+          if (current.kind === "connecting" || current.kind === "connected") {
+            void sendSignal(
+              sessionId,
+              current.peerId,
+              "end",
+              undefined,
+              current.connectionToken,
+            );
           }
           teardown("Connection failed (network).");
         }
       },
       onChannelOpen: () => {
-        setConn({ kind: "connected", peerId });
+        setConn({ kind: "connected", peerId, connectionToken });
       },
     });
     peerRef.current = ps;
@@ -159,21 +188,45 @@ export default function Home() {
 
   function requestConnection(peerId: string) {
     if (connRef.current.kind !== "idle") return;
+    openChat();
     setConn({ kind: "requesting", peerId });
-    void sendSignal(sessionId, peerId, "request").catch(() => {
-      if (
-        connRef.current.kind === "requesting" &&
-        connRef.current.peerId === peerId
-      ) {
-        teardown("Could not send connection request.");
-      }
-    });
+    void sendSignal(sessionId, peerId, "request")
+      .then((connectionToken) => {
+        const current = connRef.current;
+        if (
+          current.kind !== "requesting" ||
+          current.peerId !== peerId ||
+          !connectionToken
+        ) {
+          if (connectionToken) {
+            void sendSignal(sessionId, peerId, "end", undefined, connectionToken);
+          }
+          return;
+        }
+        setConn({ ...current, connectionToken });
+      })
+      .catch(() => {
+        if (
+          connRef.current.kind === "requesting" &&
+          connRef.current.peerId === peerId
+        ) {
+          teardown("Could not send connection request.");
+        }
+      });
     requestTimer.current = setTimeout(() => {
       if (
         connRef.current.kind === "requesting" &&
         connRef.current.peerId === peerId
       ) {
-        void sendSignal(sessionId, peerId, "end");
+        if (connRef.current.connectionToken) {
+          void sendSignal(
+            sessionId,
+            peerId,
+            "end",
+            undefined,
+            connRef.current.connectionToken,
+          );
+        }
         teardown("No answer.");
       }
     }, REQUEST_TIMEOUT_MS);
@@ -181,33 +234,61 @@ export default function Home() {
 
   function cancelRequest() {
     if (connRef.current.kind === "requesting") {
-      void sendSignal(sessionId, connRef.current.peerId, "end");
+      if (connRef.current.connectionToken) {
+        void sendSignal(
+          sessionId,
+          connRef.current.peerId,
+          "end",
+          undefined,
+          connRef.current.connectionToken,
+        );
+      }
     }
     teardown();
   }
 
   function acceptIncoming() {
     if (connRef.current.kind !== "incoming") return;
-    const peerId = connRef.current.peerId;
-    startPeer(peerId, false);
-    void sendSignal(sessionId, peerId, "accept").catch(() => {
+    const { peerId, connectionToken } = connRef.current;
+    openChat();
+    startPeer(peerId, false, connectionToken);
+    void sendSignal(sessionId, peerId, "accept", undefined, connectionToken).catch(() => {
       teardown("Could not accept connection.");
     });
-    setConn({ kind: "connecting", peerId });
+    setConn({ kind: "connecting", peerId, connectionToken });
   }
 
   function declineIncoming() {
     if (connRef.current.kind !== "incoming") return;
-    void sendSignal(sessionId, connRef.current.peerId, "decline");
+    void sendSignal(
+      sessionId,
+      connRef.current.peerId,
+      "decline",
+      undefined,
+      connRef.current.connectionToken,
+    );
     setConn({ kind: "idle" });
   }
 
   function endConnection() {
     const c = connRef.current;
     if (c.kind === "connecting" || c.kind === "connected") {
-      void sendSignal(sessionId, c.peerId, "end");
+      void sendSignal(sessionId, c.peerId, "end", undefined, c.connectionToken);
     }
     teardown();
+  }
+
+  function requestEndConnection() {
+    setConfirmingEnd(true);
+  }
+
+  function cancelEndConnection() {
+    setConfirmingEnd(false);
+  }
+
+  function confirmEndConnection() {
+    setConfirmingEnd(false);
+    endConnection();
   }
 
   function startVideoRequest() {
@@ -249,25 +330,51 @@ export default function Home() {
   function processSignal(sig: SignalMsg) {
     switch (sig.type) {
       case "request": {
-        if (connRef.current.kind === "idle") {
-          setConn({ kind: "incoming", peerId: sig.fromId });
+        if (connRef.current.kind === "idle" && sig.connectionToken) {
+          setConn({
+            kind: "incoming",
+            peerId: sig.fromId,
+            connectionToken: sig.connectionToken,
+          });
         } else {
-          void sendSignal(sessionId, sig.fromId, "decline");
+          if (sig.connectionToken) {
+            void sendSignal(
+              sessionId,
+              sig.fromId,
+              "decline",
+              undefined,
+              sig.connectionToken,
+            );
+          }
         }
         break;
       }
       case "accept": {
         const c = connRef.current;
-        if (c.kind === "requesting" && c.peerId === sig.fromId) {
+        if (
+          c.kind === "requesting" &&
+          c.peerId === sig.fromId &&
+          (!c.connectionToken || c.connectionToken === sig.connectionToken)
+        ) {
           if (requestTimer.current) clearTimeout(requestTimer.current);
-          startPeer(sig.fromId, true);
-          setConn({ kind: "connecting", peerId: sig.fromId });
+          if (!sig.connectionToken) break;
+          startPeer(sig.fromId, true, sig.connectionToken);
+          openChat();
+          setConn({
+            kind: "connecting",
+            peerId: sig.fromId,
+            connectionToken: sig.connectionToken,
+          });
         }
         break;
       }
       case "decline": {
         const c = connRef.current;
-        if (c.kind === "requesting" && c.peerId === sig.fromId) {
+        if (
+          c.kind === "requesting" &&
+          c.peerId === sig.fromId &&
+          (!c.connectionToken || c.connectionToken === sig.connectionToken)
+        ) {
           if (requestTimer.current) clearTimeout(requestTimer.current);
           teardown("Request declined.");
         }
@@ -279,11 +386,16 @@ export default function Home() {
         const c = connRef.current;
         const peerId =
           c.kind === "connecting" || c.kind === "connected" ? c.peerId : null;
-        if (peerRef.current && peerId === sig.fromId) {
-          void peerRef.current.handleSignal(
-            sig.type as DescType,
-            sig.payload ?? "",
-          ).catch(() => teardown("Connection signaling failed."));
+        if (
+          peerRef.current &&
+          peerId === sig.fromId &&
+          c.kind !== "idle" &&
+          c.kind !== "requesting" &&
+          c.connectionToken === sig.connectionToken
+        ) {
+          void peerRef.current
+            .handleSignal(sig.type as DescType, sig.payload ?? "")
+            .catch(() => teardown("Connection signaling failed."));
         }
         break;
       }
@@ -293,7 +405,8 @@ export default function Home() {
           (c.kind === "incoming" ||
             c.kind === "connecting" ||
             c.kind === "connected") &&
-          c.peerId === sig.fromId
+          c.peerId === sig.fromId &&
+          c.connectionToken === sig.connectionToken
         ) {
           if (c.kind === "incoming") setConn({ kind: "idle" });
           else teardown("Stranger disconnected.");
@@ -320,9 +433,6 @@ export default function Home() {
         setPeers(data.peers);
         for (const s of data.signals) processSignalRef.current(s);
       } catch {
-        // Presence is intentionally reaped after a missed heartbeat. A tab
-        // that resumes after being backgrounded or temporarily offline must
-        // register itself again before polling can continue normally.
         const location = locationRef.current;
         if (active && location) {
           try {
@@ -373,18 +483,34 @@ export default function Home() {
         canConnect={conn.kind === "idle"}
       />
 
+      {!inChat && (
+        <NearbyList
+          peers={peers}
+          me={myLocation}
+          canConnect={conn.kind === "idle"}
+          onPeerClick={requestConnection}
+        />
+      )}
+
       {notice && (
-        <div className="absolute left-1/2 top-20 z-30 -translate-x-1/2 rounded-full bg-zinc-800/90 px-4 py-2 text-sm text-zinc-100 shadow-lg backdrop-blur">
+        <div className="pulse-glass absolute left-1/2 top-20 z-30 -translate-x-1/2 rounded-full px-4 py-2 text-sm text-[var(--space-text)]">
           {notice}
         </div>
       )}
 
       {conn.kind === "requesting" && (
-        <div className="absolute left-1/2 top-20 z-30 flex -translate-x-1/2 items-center gap-3 rounded-full bg-zinc-800/90 px-4 py-2 text-sm text-zinc-100 shadow-lg backdrop-blur">
-          <span>Requesting connection…</span>
+        <div className="pulse-glass absolute left-1/2 top-5 z-30 flex w-[calc(100%-2rem)] max-w-sm -translate-x-1/2 items-center gap-3 rounded-2xl px-4 py-3">
+          <span className="relative flex h-3 w-3 shrink-0">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[var(--space-gold)] opacity-50" />
+            <span className="relative inline-flex h-3 w-3 rounded-full bg-[var(--space-gold)]" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-[var(--space-gold)]">Connection request</p>
+            <p className="truncate text-sm text-[var(--space-text)]">Requesting connection…</p>
+          </div>
           <button
             onClick={cancelRequest}
-            className="rounded-full bg-zinc-700 px-3 py-1 text-xs hover:bg-zinc-600"
+            className="shrink-0 rounded-xl border border-[var(--space-border)] px-3 py-1.5 text-xs font-medium text-[var(--space-nebula-bright)] transition hover:border-[var(--space-nebula)] hover:bg-[var(--space-nebula)]/10"
           >
             Cancel
           </button>
@@ -401,7 +527,15 @@ export default function Home() {
         />
       )}
 
-      {inChat && (
+      {inChat && !chatOpen && (
+        <FloatingChatHead
+          connected={conn.kind === "connected"}
+          unreadCount={chatUnread}
+          onOpen={openChat}
+        />
+      )}
+
+      {inChat && chatOpen && (
         <ChatPanel
           messages={messages}
           connected={conn.kind === "connected"}
@@ -411,12 +545,25 @@ export default function Home() {
             addMessage(true, text);
           }}
           onStartVideo={startVideoRequest}
-          onEnd={endConnection}
+          onEnd={requestEndConnection}
+          onClose={closeChat}
+        />
+      )}
+
+      {confirmingEnd && (
+        <ConnectionPrompt
+          eyebrow="End conversation"
+          title="Leave this conversation?"
+          subtitle="Your messages and connection will end for both of you."
+          acceptLabel="End conversation"
+          declineLabel="Keep chatting"
+          onAccept={confirmEndConnection}
+          onDecline={cancelEndConnection}
         />
       )}
 
       {video === "requesting" && (
-        <div className="absolute bottom-24 left-1/2 z-30 -translate-x-1/2 rounded-full bg-zinc-800/90 px-4 py-2 text-sm text-zinc-100 shadow-lg backdrop-blur">
+        <div className="pulse-glass absolute bottom-24 left-1/2 z-30 -translate-x-1/2 rounded-full px-4 py-2 text-sm text-[var(--space-text)]">
           Waiting for stranger to accept video…
         </div>
       )}
