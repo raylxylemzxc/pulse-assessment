@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type { IcebreakerState } from "@/lib/webrtc";
 
 export interface ChatMessage {
   id: number;
@@ -14,6 +15,12 @@ export default function ChatPanel({
   videoBusy,
   onSend,
   onStartVideo,
+  icebreaker,
+  icebreakerUsed,
+  onStartIcebreaker,
+  onAcceptIcebreaker,
+  onDeclineIcebreaker,
+  onChooseIcebreaker,
   onEnd,
   onClose,
 }: {
@@ -22,6 +29,12 @@ export default function ChatPanel({
   videoBusy: boolean;
   onSend: (text: string) => void;
   onStartVideo: () => void;
+  icebreaker: IcebreakerState | null;
+  icebreakerUsed: boolean;
+  onStartIcebreaker: () => void;
+  onAcceptIcebreaker: () => void;
+  onDeclineIcebreaker: () => void;
+  onChooseIcebreaker: (choice: 0 | 1) => void;
   onEnd: () => void;
   onClose: () => void;
 }) {
@@ -120,6 +133,71 @@ export default function ChatPanel({
       </div>
 
       <form onSubmit={submit} className="pulse-chat-compose flex flex-col gap-2 border-t border-[var(--space-border)]/70 p-4">
+        {!icebreaker ? (icebreakerUsed ? null : (
+          <button
+            type="button"
+            onClick={onStartIcebreaker}
+            disabled={!connected}
+            className="group flex items-center gap-3 rounded-2xl border border-[var(--space-gold)]/25 bg-[var(--space-gold)]/5 px-3 py-2.5 text-left transition hover:border-[var(--space-gold)]/60 hover:bg-[var(--space-gold)]/10 disabled:opacity-50"
+          >
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-[var(--space-gold)]/15 text-sm text-[var(--space-gold)]">✦</span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-xs font-semibold text-[var(--space-text)]">Break the ice</span>
+              <span className="block text-[10px] text-[var(--space-muted)]">Answer a quick question together</span>
+            </span>
+            <span className="text-xs text-[var(--space-gold)] transition-transform group-hover:translate-x-0.5">→</span>
+          </button>
+        )) : icebreaker.status === "requesting" ? (
+          <div className="rounded-2xl border border-[var(--space-gold)]/25 bg-[var(--space-gold)]/5 px-3 py-2.5">
+            <span className="block text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--space-gold)]">Pulse invite sent</span>
+            <span className="mt-1 block text-xs text-[var(--space-muted)]">Waiting for the stranger to opt in…</span>
+          </div>
+        ) : icebreaker.status === "incoming" ? (
+          <div className="rounded-2xl border border-[var(--space-gold)]/35 bg-[var(--space-gold)]/5 p-3">
+            <span className="block text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--space-gold)]">Pulse invitation</span>
+            <p className="mt-1 text-sm font-medium text-[var(--space-text)]">The stranger wants to answer a quick question together.</p>
+            <div className="mt-3 flex gap-2">
+              <button type="button" onClick={onAcceptIcebreaker} className="flex-1 rounded-xl bg-[var(--space-gold)] px-3 py-2 text-xs font-semibold text-[var(--space-void)] transition hover:bg-[#f5d36b]">Accept</button>
+              <button type="button" onClick={onDeclineIcebreaker} className="flex-1 rounded-xl border border-[var(--space-border)] px-3 py-2 text-xs text-[var(--space-muted)] transition hover:border-[var(--space-nebula)] hover:text-[var(--space-text)]">Not now</button>
+            </div>
+          </div>
+        ) : (
+          <div className="rounded-2xl border border-[var(--space-gold)]/35 bg-[linear-gradient(135deg,rgba(232,185,62,0.12),rgba(91,70,140,0.12))] p-3">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--space-gold)]">Pulse question</span>
+              {icebreaker.localChoice !== undefined && icebreaker.remoteChoice === undefined && (
+                <span className="text-[10px] text-[var(--space-muted)]">Waiting for them…</span>
+              )}
+            </div>
+            <p className="text-sm font-medium text-[var(--space-text)]">{icebreaker.prompt.question}</p>
+            {icebreaker.localChoice === undefined ? (
+              <div className="mt-3 grid grid-cols-2 gap-2">
+                {icebreaker.prompt.options.map((option, index) => (
+                  <button
+                    type="button"
+                    key={option}
+                    onClick={() => onChooseIcebreaker(index as 0 | 1)}
+                    className="rounded-xl border border-[var(--space-border)] bg-[var(--space-void)]/50 px-2 py-2 text-xs text-[var(--space-text)] transition hover:border-[var(--space-gold)] hover:bg-[var(--space-gold)]/10"
+                  >
+                    {option}
+                  </button>
+                ))}
+              </div>
+            ) : icebreaker.remoteChoice === undefined ? (
+              <p className="mt-3 rounded-xl bg-[var(--space-void)]/35 px-3 py-2 text-xs text-[var(--space-muted)]">
+                You chose <span className="font-semibold text-[var(--space-text)]">{icebreaker.prompt.options[icebreaker.localChoice]}</span>
+              </p>
+            ) : (
+              <div className="mt-3 rounded-xl bg-[var(--space-void)]/35 px-3 py-2 text-xs text-[var(--space-muted)]">
+                {icebreaker.localChoice === icebreaker.remoteChoice ? (
+                  <>You both chose <span className="font-semibold text-[var(--space-gold)]">{icebreaker.prompt.options[icebreaker.localChoice]}</span> ✨</>
+                ) : (
+                  <>You chose <span className="font-semibold text-[var(--space-text)]">{icebreaker.prompt.options[icebreaker.localChoice]}</span>; they chose <span className="font-semibold text-[var(--space-text)]">{icebreaker.prompt.options[icebreaker.remoteChoice]}</span>.</>
+                )}
+              </div>
+            )}
+          </div>
+        )}
         <div className="flex gap-2">
         <input
           value={draft}

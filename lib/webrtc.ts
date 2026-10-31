@@ -5,6 +5,26 @@ export type PeerControl =
   | "video-decline"
   | "video-end";
 
+export interface IcebreakerPrompt {
+  id: string;
+  question: string;
+  options: [string, string];
+}
+
+export type IcebreakerMessage =
+  | { action: "request"; roundId: string; prompt: IcebreakerPrompt }
+  | { action: "accept"; roundId: string }
+  | { action: "decline"; roundId: string }
+  | { action: "choice"; roundId: string; choice: 0 | 1 };
+
+export interface IcebreakerState {
+  roundId: string;
+  prompt: IcebreakerPrompt;
+  status: "requesting" | "incoming" | "active";
+  localChoice?: 0 | 1;
+  remoteChoice?: 0 | 1;
+}
+
 const MAX_CHAT_LENGTH = 4_000;
 const MAX_PENDING_CANDIDATES = 100;
 const VALID_CONTROLS: PeerControl[] = [
@@ -18,6 +38,7 @@ interface PeerCallbacks {
   onSignal: (type: DescType, payload: string) => void;
   onChat: (text: string) => void;
   onControl: (ctrl: PeerControl) => void;
+  onIcebreaker: (message: IcebreakerMessage) => void;
   onRemoteStream: (stream: MediaStream | null) => void;
   onConnectionState: (state: RTCPeerConnectionState) => void;
   onChannelOpen: () => void;
@@ -100,6 +121,43 @@ export class PeerSession {
           VALID_CONTROLS.includes(msg.ctrl as PeerControl)
         ) {
           this.cb.onControl(msg.ctrl as PeerControl);
+        } else if (
+          msg.t === "icebreaker" &&
+          (msg.action === "request" ||
+            msg.action === "accept" ||
+            msg.action === "decline" ||
+            msg.action === "choice") &&
+          typeof msg.roundId === "string"
+        ) {
+          if (msg.action === "request") {
+            const prompt = msg.prompt;
+            if (
+              prompt &&
+              typeof prompt.id === "string" &&
+              typeof prompt.question === "string" &&
+              Array.isArray(prompt.options) &&
+              prompt.options.length === 2 &&
+              prompt.options.every((option: unknown) => typeof option === "string")
+            ) {
+              this.cb.onIcebreaker({
+                action: "request",
+                roundId: msg.roundId,
+                prompt: {
+                  id: prompt.id,
+                  question: prompt.question,
+                  options: [prompt.options[0], prompt.options[1]],
+                },
+              });
+            }
+          } else if (msg.action === "accept" || msg.action === "decline") {
+            this.cb.onIcebreaker({ action: msg.action, roundId: msg.roundId });
+          } else if (msg.choice === 0 || msg.choice === 1) {
+            this.cb.onIcebreaker({
+              action: "choice",
+              roundId: msg.roundId,
+              choice: msg.choice,
+            });
+          }
         }
       } catch {}
     };
@@ -164,6 +222,10 @@ export class PeerSession {
 
   sendControl(ctrl: PeerControl) {
     this.safeSend({ t: "ctrl", ctrl });
+  }
+
+  sendIcebreaker(message: IcebreakerMessage) {
+    this.safeSend({ t: "icebreaker", ...message });
   }
 
   private safeSend(obj: unknown) {
