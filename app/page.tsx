@@ -6,8 +6,17 @@ import WorldMap from "./components/WorldMap";
 import ConnectionPrompt from "./components/ConnectionPrompt";
 import ChatPanel, { type ChatMessage } from "./components/ChatPanel";
 import VideoPanel from "./components/VideoPanel";
+import FloatingChatHead from "./components/FloatingChatHead";
+import NearbyList from "./components/NearbyList";
 import { join, leave, poll, sendSignal } from "@/lib/api";
-import { PeerSession, type DescType, type PeerControl } from "@/lib/webrtc";
+import {
+  PeerSession,
+  type DescType,
+  type IcebreakerMessage,
+  type IcebreakerPrompt,
+  type IcebreakerState,
+  type PeerControl,
+} from "@/lib/webrtc";
 import { POLL_INTERVAL_MS } from "@/lib/presence";
 import { type PeerDot, type SignalMsg } from "@/lib/types";
 
@@ -19,6 +28,12 @@ type Conn =
   | { kind: "connected"; peerId: string; connectionToken: string };
 
 type VideoState = "none" | "requesting" | "incoming" | "active";
+const ICEBREAKER_PROMPTS: IcebreakerPrompt[] = [
+  { id: "morning-night", question: "Which would you choose?", options: ["Early morning", "Late night"] },
+  { id: "city-nature", question: "Where would you rather spend a free day?", options: ["A lively city", "Somewhere quiet"] },
+  { id: "sweet-savory", question: "What is the better comfort food?", options: ["Something sweet", "Something savory"] },
+  { id: "plan-spontaneous", question: "What sounds more like you?", options: ["A thoughtful plan", "A spontaneous adventure"] },
+];
 
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -27,9 +42,15 @@ export default function Home() {
   const [sessionId] = useState(() => crypto.randomUUID());
   const [peers, setPeers] = useState<PeerDot[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [chatOpen, setChatOpen] = useState(true);
+  const chatOpenRef = useRef(true);
+  const [chatUnread, setChatUnread] = useState(0);
+  const [confirmingEnd, setConfirmingEnd] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  const [icebreaker, setIcebreaker] = useState<IcebreakerState | null>(null);
+  const [icebreakerUsed, setIcebreakerUsed] = useState(false);
   const [myLocation, setMyLocation] = useState<{ lat: number; lng: number } | null>(
     null,
   );
@@ -54,6 +75,17 @@ export default function Home() {
   const requestTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const disconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  useEffect(() => {
+    if (!icebreaker) return;
+    const completed =
+      icebreaker.localChoice !== undefined && icebreaker.remoteChoice !== undefined;
+    const shouldExpire =
+      completed || icebreaker.status === "requesting" || icebreaker.status === "incoming";
+    if (!shouldExpire) return;
+    const timer = window.setTimeout(() => setIcebreaker(null), 10_000);
+    return () => window.clearTimeout(timer);
+  }, [icebreaker]);
+
   function showNotice(text: string) {
     setNotice(text);
     window.setTimeout(() => setNotice(null), 3500);
@@ -61,6 +93,18 @@ export default function Home() {
 
   function addMessage(mine: boolean, text: string) {
     setMessages((prev) => [...prev, { id: msgId.current++, mine, text }]);
+    if (!mine && !chatOpenRef.current) setChatUnread((count) => count + 1);
+  }
+
+  function openChat() {
+    chatOpenRef.current = true;
+    setChatOpen(true);
+    setChatUnread(0);
+  }
+
+  function closeChat() {
+    chatOpenRef.current = false;
+    setChatOpen(false);
   }
 
   function teardown(message?: string) {
@@ -73,8 +117,57 @@ export default function Home() {
     setRemoteStream(null);
     setVideo("none");
     setMessages([]);
+    setIcebreaker(null);
+    setIcebreakerUsed(false);
     setConn({ kind: "idle" });
     if (message) showNotice(message);
+  }
+
+  function handleIcebreaker(message: IcebreakerMessage) {
+    setIcebreaker((current) => {
+      if (message.action === "request") {
+        if (icebreakerUsed) return current;
+        setIcebreakerUsed(true);
+        return current ?? { roundId: message.roundId, prompt: message.prompt, status: "incoming" };
+      }
+      if (!current || current.roundId !== message.roundId) return current;
+      if (message.action === "accept") {
+        return { ...current, status: "active" };
+      }
+      if (message.action === "decline") return null;
+      if (current.status !== "active") return current;
+      return { ...current, remoteChoice: message.choice };
+    });
+  }
+
+  function startIcebreaker() {
+    if (!peerRef.current || connRef.current.kind !== "connected" || icebreaker || icebreakerUsed) return;
+    const prompt = ICEBREAKER_PROMPTS[Math.floor(Math.random() * ICEBREAKER_PROMPTS.length)];
+    const roundId = crypto.randomUUID();
+    setIcebreakerUsed(true);
+    setIcebreaker({ roundId, prompt, status: "requesting" });
+    peerRef.current.sendIcebreaker({ action: "request", roundId, prompt });
+  }
+
+  function acceptIcebreaker() {
+    const current = icebreaker;
+    if (!current || current.status !== "incoming" || !peerRef.current) return;
+    setIcebreaker({ ...current, status: "active" });
+    peerRef.current.sendIcebreaker({ action: "accept", roundId: current.roundId });
+  }
+
+  function declineIcebreaker() {
+    const current = icebreaker;
+    if (!current || current.status !== "incoming" || !peerRef.current) return;
+    peerRef.current.sendIcebreaker({ action: "decline", roundId: current.roundId });
+    setIcebreaker(null);
+  }
+
+  function chooseIcebreaker(choice: 0 | 1) {
+    const current = icebreaker;
+    if (!current || current.status !== "active" || current.localChoice !== undefined || !peerRef.current) return;
+    setIcebreaker({ ...current, localChoice: choice });
+    peerRef.current.sendIcebreaker({ action: "choice", roundId: current.roundId, choice });
   }
 
   function startPeer(peerId: string, initiator: boolean, connectionToken: string) {
@@ -86,6 +179,7 @@ export default function Home() {
       },
       onChat: (text) => addMessage(false, text),
       onControl: (ctrl) => handleControl(ctrl),
+      onIcebreaker: (message) => handleIcebreaker(message),
       onRemoteStream: (stream) => setRemoteStream(stream),
       onConnectionState: (state) => {
         if (state === "connected") {
@@ -170,6 +264,7 @@ export default function Home() {
 
   function requestConnection(peerId: string) {
     if (connRef.current.kind !== "idle") return;
+    openChat();
     setConn({ kind: "requesting", peerId });
     void sendSignal(sessionId, peerId, "request")
       .then((connectionToken) => {
@@ -231,6 +326,7 @@ export default function Home() {
   function acceptIncoming() {
     if (connRef.current.kind !== "incoming") return;
     const { peerId, connectionToken } = connRef.current;
+    openChat();
     startPeer(peerId, false, connectionToken);
     void sendSignal(sessionId, peerId, "accept", undefined, connectionToken).catch(() => {
       teardown("Could not accept connection.");
@@ -256,6 +352,19 @@ export default function Home() {
       void sendSignal(sessionId, c.peerId, "end", undefined, c.connectionToken);
     }
     teardown();
+  }
+
+  function requestEndConnection() {
+    setConfirmingEnd(true);
+  }
+
+  function cancelEndConnection() {
+    setConfirmingEnd(false);
+  }
+
+  function confirmEndConnection() {
+    setConfirmingEnd(false);
+    endConnection();
   }
 
   function startVideoRequest() {
@@ -326,6 +435,7 @@ export default function Home() {
           if (requestTimer.current) clearTimeout(requestTimer.current);
           if (!sig.connectionToken) break;
           startPeer(sig.fromId, true, sig.connectionToken);
+          openChat();
           setConn({
             kind: "connecting",
             peerId: sig.fromId,
@@ -447,7 +557,23 @@ export default function Home() {
         me={myLocation}
         onPeerClick={requestConnection}
         canConnect={conn.kind === "idle"}
+        chatOpen={inChat}
       />
+
+      <div className="pulse-glass absolute bottom-5 left-5 z-10 rounded-full px-3.5 py-2 text-xs text-[var(--space-muted)] shadow-lg">
+        <span className="mr-2 inline-block h-1.5 w-1.5 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]" />
+        <span className="text-[var(--space-text)]">{peers.length + 1}</span>{" "}
+        online
+      </div>
+
+      {!inChat && (
+        <NearbyList
+          peers={peers}
+          me={myLocation}
+          canConnect={conn.kind === "idle"}
+          onPeerClick={requestConnection}
+        />
+      )}
 
       {notice && (
         <div className="pulse-glass absolute left-1/2 top-20 z-30 -translate-x-1/2 rounded-full px-4 py-2 text-sm text-[var(--space-text)]">
@@ -484,7 +610,15 @@ export default function Home() {
         />
       )}
 
-      {inChat && (
+      {inChat && !chatOpen && (
+        <FloatingChatHead
+          connected={conn.kind === "connected"}
+          unreadCount={chatUnread}
+          onOpen={openChat}
+        />
+      )}
+
+      {inChat && chatOpen && (
         <ChatPanel
           messages={messages}
           connected={conn.kind === "connected"}
@@ -494,7 +628,26 @@ export default function Home() {
             addMessage(true, text);
           }}
           onStartVideo={startVideoRequest}
-          onEnd={endConnection}
+          icebreaker={icebreaker}
+          icebreakerUsed={icebreakerUsed}
+          onStartIcebreaker={startIcebreaker}
+          onAcceptIcebreaker={acceptIcebreaker}
+          onDeclineIcebreaker={declineIcebreaker}
+          onChooseIcebreaker={chooseIcebreaker}
+          onEnd={requestEndConnection}
+          onClose={closeChat}
+        />
+      )}
+
+      {confirmingEnd && (
+        <ConnectionPrompt
+          eyebrow="End conversation"
+          title="Leave this conversation?"
+          subtitle="Your messages and connection will end for both of you."
+          acceptLabel="End conversation"
+          declineLabel="Keep chatting"
+          onAccept={confirmEndConnection}
+          onDecline={cancelEndConnection}
         />
       )}
 
