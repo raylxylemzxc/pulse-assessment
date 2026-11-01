@@ -559,7 +559,7 @@ export default function Home() {
         canConnect={conn.kind === "idle"}
       />
 
-      <div className="pulse-glass absolute bottom-5 left-1/2 z-10 -translate-x-1/2 rounded-full px-3.5 py-2 text-xs text-[var(--space-muted)] shadow-lg">
+      <div className="pulse-glass absolute bottom-5 left-5 z-10 rounded-full px-3.5 py-2 text-xs text-[var(--space-muted)] shadow-lg">
         <span className="mr-2 inline-block h-1.5 w-1.5 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]" />
         <span className="text-[var(--space-text)]">{peers.length + 1}</span>{" "}
         online

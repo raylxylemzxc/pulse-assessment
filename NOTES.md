@@ -37,6 +37,19 @@
 - Nearby discovery is hidden while an active conversation is open to keep the
   interface focused.
 
+## Phase 5 — Interaction polish
+
+- Added a centered entry transition: the halo begins zooming when “Enter Pulse”
+  is clicked and expands until it disappears into the live experience.
+- Kept the halo centered during its beat and zoom animations, with page overflow
+  clipped to prevent transition scrollbars.
+- Made entry text fade out without translating or scaling, and added reduced-motion
+  handling for the transition.
+- Refactored connection prompt styling into reusable semantic dialog theme classes
+  in `app/globals.css`.
+- Removed the decorative icon from the icebreaker action to keep the chat composer
+  more focused.
+
 ### Current authorization implementation
 
 - Each joined browser receives a signed, HttpOnly session cookie. Join, leave,

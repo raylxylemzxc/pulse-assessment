@@ -9,6 +9,13 @@ export default function EntryGate({
 }) {
   const [status, setStatus] = useState<"idle" | "locating" | "error">("idle");
   const [error, setError] = useState<string>("");
+  const [isLaunching, setIsLaunching] = useState(false);
+  const [isZooming, setIsZooming] = useState(false);
+  const [isExiting, setIsExiting] = useState(false);
+
+  function pause(ms: number) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
 
   function enter() {
     if (!("geolocation" in navigator)) {
@@ -17,16 +24,25 @@ export default function EntryGate({
       return;
     }
     setStatus("locating");
+    setIsLaunching(true);
+    setIsZooming(true);
     navigator.geolocation.getCurrentPosition(
       (pos) => {
-        void Promise.resolve(onReady(pos.coords.latitude, pos.coords.longitude)).catch(
-          () => {
+        setIsLaunching(false);
+        setIsExiting(true);
+        void pause(700)
+          .then(() => onReady(pos.coords.latitude, pos.coords.longitude))
+          .catch(() => {
+            setIsLaunching(false);
+            setIsZooming(false);
+            setIsExiting(false);
             setStatus("error");
             setError("Couldn't join Pulse. Please try again.");
-          },
-        );
+          });
       },
       (err) => {
+        setIsLaunching(false);
+        setIsZooming(false);
         setStatus("error");
         setError(
           err.code === err.PERMISSION_DENIED
@@ -41,10 +57,10 @@ export default function EntryGate({
   }
 
   return (
-    <div className="relative flex min-h-full flex-1 flex-col items-center justify-center overflow-hidden bg-[var(--space-void)] p-6 text-[var(--space-text)]">
-      <div className="absolute left-1/2 top-1/2 h-[34rem] w-[34rem] -translate-x-1/2 -translate-y-1/2 rounded-full pulse-orbit" />
-      <div className="absolute left-1/2 top-1/2 h-[22rem] w-[22rem] -translate-x-1/2 -translate-y-1/2 rounded-full border border-[var(--space-nebula)]/10" />
-      <div className="relative z-10 flex max-w-md flex-col items-center text-center">
+    <div className={`pulse-entry-gate relative flex min-h-full flex-1 flex-col items-center justify-center overflow-hidden bg-[var(--space-void)] p-6 text-[var(--space-text)]${isLaunching ? " pulse-entry-gate-launching" : ""}${isZooming ? " pulse-entry-gate-zooming" : ""}${isExiting ? " pulse-entry-gate-exiting" : ""}`}>
+      <div className="absolute left-1/2 top-1/2 h-[34rem] w-[34rem] rounded-full pulse-orbit" />
+      <div className="pulse-entry-ring absolute left-1/2 top-1/2 h-[22rem] w-[22rem] rounded-full border border-[var(--space-nebula)]/10" />
+      <div className="pulse-entry-content relative z-10 flex max-w-md flex-col items-center text-center">
         <p className="mb-3 text-[10px] font-semibold uppercase tracking-[0.35em] text-[var(--space-gold)]">Anonymous connections</p>
       <div className="text-center">
         <h1 className="text-5xl font-bold tracking-[-0.06em]">Pulse</h1>

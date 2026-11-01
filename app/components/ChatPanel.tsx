@@ -140,7 +140,6 @@ export default function ChatPanel({
             disabled={!connected}
             className="group flex items-center gap-3 rounded-2xl border border-[var(--space-gold)]/25 bg-[var(--space-gold)]/5 px-3 py-2.5 text-left transition hover:border-[var(--space-gold)]/60 hover:bg-[var(--space-gold)]/10 disabled:opacity-50"
           >
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-[var(--space-gold)]/15 text-sm text-[var(--space-gold)]">✦</span>
             <span className="min-w-0 flex-1">
               <span className="block text-xs font-semibold text-[var(--space-text)]">Break the ice</span>
               <span className="block text-[10px] text-[var(--space-muted)]">Answer a quick question together</span>
