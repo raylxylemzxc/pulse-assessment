@@ -23,6 +23,7 @@ export interface SignalMsg {
   toId: string;
   type: SignalType;
   payload: string | null;
+  connectionToken?: string;
   createdAt: string;
 }
 

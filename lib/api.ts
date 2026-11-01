@@ -27,13 +27,16 @@ export async function sendSignal(
   toId: string,
   type: SignalType,
   payload?: string,
-): Promise<void> {
+  connectionToken?: string,
+): Promise<string | undefined> {
   const res = await fetch("/api/signal", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ fromId, toId, type, payload }),
+    body: JSON.stringify({ fromId, toId, type, payload, connectionToken }),
   });
   if (!res.ok) throw new Error(`signal failed: ${res.status}`);
+  const data = (await res.json()) as { connectionToken?: unknown };
+  return typeof data.connectionToken === "string" ? data.connectionToken : undefined;
 }
 
 // Fire-and-forget leave that survives the tab closing.

@@ -1,6 +1,12 @@
 import type { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import type { SignalType } from "@/lib/types";
+import {
+  createConnectionToken,
+  isAuthorizedSession,
+  isConnectionTokenForPair,
+  isValidSessionId,
+} from "@/lib/session";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,13 +34,16 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "invalid body" }, { status: 400 });
   }
 
-  const { fromId, toId, type, payload } = (body ?? {}) as Record<
+  const { fromId, toId, type, payload, connectionToken } = (body ?? {}) as Record<
     string,
     unknown
   >;
 
-  if (typeof fromId !== "string" || typeof toId !== "string") {
+  if (!isValidSessionId(fromId) || !isValidSessionId(toId) || fromId === toId) {
     return Response.json({ error: "invalid ids" }, { status: 400 });
+  }
+  if (!isAuthorizedSession(request, fromId)) {
+    return Response.json({ error: "unauthorized session" }, { status: 401 });
   }
   if (typeof type !== "string" || !VALID_TYPES.includes(type as SignalType)) {
     return Response.json({ error: "invalid type" }, { status: 400 });
@@ -50,33 +59,66 @@ export async function POST(request: NextRequest) {
   const signalType = type as SignalType;
   const payloadStr = typeof payload === "string" ? payload : null;
 
+  const target = await prisma.presence.findUnique({
+    where: { id: toId },
+    select: { busy: true },
+  });
+  const sender = await prisma.presence.findUnique({
+    where: { id: fromId },
+    select: { busy: true },
+  });
+  if (!sender) {
+    return Response.json({ error: "sender is offline" }, { status: 410 });
+  }
+  if (!target) {
+    return Response.json({ error: "target is offline" }, { status: 404 });
+  }
+
+  let token = typeof connectionToken === "string" ? connectionToken : null;
+  if (signalType === "request") {
+    token = createConnectionToken(fromId, toId);
+  } else if (!token || !isConnectionTokenForPair(token, fromId, toId)) {
+    return Response.json({ error: "unauthorized connection" }, { status: 403 });
+  }
+
+  if (signalType === "request" && sender.busy) {
+    return Response.json({ error: "sender is already busy" }, { status: 409 });
+  }
+  if (
+    (signalType === "offer" || signalType === "answer" || signalType === "ice") &&
+    (!sender.busy || !target.busy)
+  ) {
+    return Response.json({ error: "no active connection" }, { status: 409 });
+  }
+
   // Enforce "one active connection at a time": if the target is already busy,
   // auto-decline the request instead of delivering it.
   if (signalType === "request") {
-    const target = await prisma.presence.findUnique({
-      where: { id: toId },
-      select: { busy: true },
-    });
-    if (!target) {
-      // Target went offline — tell the initiator it was declined.
-      await sendDecline(toId, fromId);
-      return Response.json({ ok: true, autoDeclined: true });
-    }
     if (target.busy) {
-      await sendDecline(toId, fromId);
-      return Response.json({ ok: true, autoDeclined: true });
+      await sendDecline(toId, fromId, token);
+      return Response.json({ ok: true, autoDeclined: true, connectionToken: token });
     }
   }
 
   // Busy transitions:
   // - accept: the connection is now active → mark BOTH peers busy.
-  // - decline/end: free both peers.
+  // - end: free both peers.
   if (signalType === "accept") {
-    await prisma.presence.updateMany({
-      where: { id: { in: [fromId, toId] } },
-      data: { busy: true },
-    });
-  } else if (signalType === "decline" || signalType === "end") {
+    try {
+      await prisma.$transaction(async (tx) => {
+        const claimed = await tx.presence.updateMany({
+          where: { id: { in: [fromId, toId] }, busy: false },
+          data: { busy: true },
+        });
+        if (claimed.count !== 2) throw new Error("connection is no longer available");
+      });
+    } catch {
+      return Response.json(
+        { error: "connection is no longer available" },
+        { status: 409 },
+      );
+    }
+  } else if (signalType === "end") {
     await prisma.presence.updateMany({
       where: { id: { in: [fromId, toId] } },
       data: { busy: false },
@@ -84,15 +126,29 @@ export async function POST(request: NextRequest) {
   }
 
   await prisma.signal.create({
-    data: { fromId, toId, type: signalType, payload: payloadStr },
+    data: {
+      fromId,
+      toId,
+      type: signalType,
+      payload: JSON.stringify({ token, payload: payloadStr }),
+    },
   });
 
-  return Response.json({ ok: true });
+  return Response.json({ ok: true, connectionToken: token });
 }
 
 // Helper: deliver an auto-decline from `target` back to `initiator`.
-async function sendDecline(targetId: string, initiatorId: string) {
+async function sendDecline(
+  targetId: string,
+  initiatorId: string,
+  connectionToken: string,
+) {
   await prisma.signal.create({
-    data: { fromId: targetId, toId: initiatorId, type: "decline", payload: null },
+    data: {
+      fromId: targetId,
+      toId: initiatorId,
+      type: "decline",
+      payload: JSON.stringify({ token: connectionToken, payload: null }),
+    },
   });
 }

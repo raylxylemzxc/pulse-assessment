@@ -5,6 +5,15 @@ export type PeerControl =
   | "video-decline"
   | "video-end";
 
+const MAX_CHAT_LENGTH = 4_000;
+const MAX_PENDING_CANDIDATES = 100;
+const VALID_CONTROLS: PeerControl[] = [
+  "video-request",
+  "video-accept",
+  "video-decline",
+  "video-end",
+];
+
 interface PeerCallbacks {
   onSignal: (type: DescType, payload: string) => void;
   onChat: (text: string) => void;
@@ -79,9 +88,17 @@ export class PeerSession {
     dc.onmessage = (e) => {
       try {
         const msg = JSON.parse(e.data as string);
-        if (msg.t === "chat" && typeof msg.text === "string") {
+        if (
+          msg.t === "chat" &&
+          typeof msg.text === "string" &&
+          msg.text.length <= MAX_CHAT_LENGTH
+        ) {
           this.cb.onChat(msg.text);
-        } else if (msg.t === "ctrl" && typeof msg.ctrl === "string") {
+        } else if (
+          msg.t === "ctrl" &&
+          typeof msg.ctrl === "string" &&
+          VALID_CONTROLS.includes(msg.ctrl as PeerControl)
+        ) {
           this.cb.onControl(msg.ctrl as PeerControl);
         }
       } catch {}
@@ -102,7 +119,9 @@ export class PeerSession {
 
     if (type === "ice") {
       if (!this.pc.remoteDescription) {
-        this.pendingCandidates.push(data);
+        if (this.pendingCandidates.length < MAX_PENDING_CANDIDATES) {
+          this.pendingCandidates.push(data);
+        }
         return;
       }
       try {
@@ -119,8 +138,6 @@ export class PeerSession {
     if (this.ignoreOffer) return;
 
     await this.pc.setRemoteDescription(desc);
-    // Candidates can arrive before the offer/answer through polling, but the
-    // browser requires a remote description before addIceCandidate succeeds.
     await this.flushPendingCandidates();
     if (desc.type === "offer") {
       await this.pc.setLocalDescription();
@@ -142,7 +159,7 @@ export class PeerSession {
   }
 
   sendChat(text: string) {
-    this.safeSend({ t: "chat", text });
+    if (text.length <= MAX_CHAT_LENGTH) this.safeSend({ t: "chat", text });
   }
 
   sendControl(ctrl: PeerControl) {
