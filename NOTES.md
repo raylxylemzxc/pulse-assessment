@@ -63,3 +63,14 @@
 - Tokens expire after 24 hours and reject future-dated timestamps.
 - Tokens are stored beside signal payloads in the existing signal record
   envelope; no database schema, migration, or initialization changes were made.
+
+## Audit follow-up
+
+- Phase 1 failures were found by exercising the complete two-browser flow and
+  checking the failure paths: stale dots after tab close, dropped chat messages,
+  out-of-order ICE candidates, signaling failures, and incomplete teardown.
+- Phase 3 priorities were identity and connection authorization first, followed
+  by payload validation and browser hardening. Concurrent connection claiming is
+  now atomic so two accepts cannot place the same user in active conversations.
+- The root layout now uses a system font stack instead of fetching Google Fonts at
+  build time, keeping the Next.js production build reproducible offline.

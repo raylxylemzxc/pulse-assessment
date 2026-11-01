@@ -104,10 +104,20 @@ export async function POST(request: NextRequest) {
   // - accept: the connection is now active → mark BOTH peers busy.
   // - end: free both peers.
   if (signalType === "accept") {
-    await prisma.presence.updateMany({
-      where: { id: { in: [fromId, toId] } },
-      data: { busy: true },
-    });
+    try {
+      await prisma.$transaction(async (tx) => {
+        const claimed = await tx.presence.updateMany({
+          where: { id: { in: [fromId, toId] }, busy: false },
+          data: { busy: true },
+        });
+        if (claimed.count !== 2) throw new Error("connection is no longer available");
+      });
+    } catch {
+      return Response.json(
+        { error: "connection is no longer available" },
+        { status: 409 },
+      );
+    }
   } else if (signalType === "end") {
     await prisma.presence.updateMany({
       where: { id: { in: [fromId, toId] } },
