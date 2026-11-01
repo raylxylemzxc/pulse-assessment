@@ -33,6 +33,7 @@ export default function Home() {
   const [myLocation, setMyLocation] = useState<{ lat: number; lng: number } | null>(
     null,
   );
+  const locationRef = useRef<{ lat: number; lng: number } | null>(null);
 
   const [conn, _setConn] = useState<Conn>({ kind: "idle" });
   const connRef = useRef<Conn>(conn);
@@ -51,6 +52,7 @@ export default function Home() {
   const peerRef = useRef<PeerSession | null>(null);
   const msgId = useRef(0);
   const requestTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const disconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   function showNotice(text: string) {
     setNotice(text);
@@ -63,6 +65,7 @@ export default function Home() {
 
   function teardown(message?: string) {
     if (requestTimer.current) clearTimeout(requestTimer.current);
+    if (disconnectTimer.current) clearTimeout(disconnectTimer.current);
     peerRef.current?.close();
     peerRef.current = null;
     setLocalStream(null);
@@ -76,13 +79,39 @@ export default function Home() {
   function startPeer(peerId: string, initiator: boolean) {
     const ps = new PeerSession(initiator, {
       onSignal: (type: DescType, payload: string) => {
-        void sendSignal(sessionId, peerId, type, payload);
+        void sendSignal(sessionId, peerId, type, payload).catch(() => {
+          if (connRef.current.kind !== "idle") {
+            teardown("Connection signaling failed.");
+          }
+        });
       },
       onChat: (text) => addMessage(false, text),
       onControl: (ctrl) => handleControl(ctrl),
       onRemoteStream: (stream) => setRemoteStream(stream),
       onConnectionState: (state) => {
+        if (state === "connected") {
+          if (disconnectTimer.current) clearTimeout(disconnectTimer.current);
+          disconnectTimer.current = null;
+          return;
+        }
+        if (state === "disconnected") {
+          if (!disconnectTimer.current) {
+            disconnectTimer.current = setTimeout(() => {
+              disconnectTimer.current = null;
+              const c = connRef.current;
+              if (c.kind === "connecting" || c.kind === "connected") {
+                void sendSignal(sessionId, c.peerId, "end");
+                teardown("Connection lost (network).");
+              }
+            }, 10_000);
+          }
+          return;
+        }
         if (state === "failed") {
+          const c = connRef.current;
+          if (c.kind === "connecting" || c.kind === "connected") {
+            void sendSignal(sessionId, c.peerId, "end");
+          }
           teardown("Connection failed (network).");
         }
       },
@@ -131,7 +160,14 @@ export default function Home() {
   function requestConnection(peerId: string) {
     if (connRef.current.kind !== "idle") return;
     setConn({ kind: "requesting", peerId });
-    void sendSignal(sessionId, peerId, "request");
+    void sendSignal(sessionId, peerId, "request").catch(() => {
+      if (
+        connRef.current.kind === "requesting" &&
+        connRef.current.peerId === peerId
+      ) {
+        teardown("Could not send connection request.");
+      }
+    });
     requestTimer.current = setTimeout(() => {
       if (
         connRef.current.kind === "requesting" &&
@@ -154,7 +190,9 @@ export default function Home() {
     if (connRef.current.kind !== "incoming") return;
     const peerId = connRef.current.peerId;
     startPeer(peerId, false);
-    void sendSignal(sessionId, peerId, "accept");
+    void sendSignal(sessionId, peerId, "accept").catch(() => {
+      teardown("Could not accept connection.");
+    });
     setConn({ kind: "connecting", peerId });
   }
 
@@ -245,7 +283,7 @@ export default function Home() {
           void peerRef.current.handleSignal(
             sig.type as DescType,
             sig.payload ?? "",
-          );
+          ).catch(() => teardown("Connection signaling failed."));
         }
         break;
       }
@@ -281,7 +319,17 @@ export default function Home() {
         if (!active) return;
         setPeers(data.peers);
         for (const s of data.signals) processSignalRef.current(s);
-      } catch {}
+      } catch {
+        // Presence is intentionally reaped after a missed heartbeat. A tab
+        // that resumes after being backgrounded or temporarily offline must
+        // register itself again before polling can continue normally.
+        const location = locationRef.current;
+        if (active && location) {
+          try {
+            await join(sessionId, location.lat, location.lng);
+          } catch {}
+        }
+      }
       if (active) timer = setTimeout(tick, POLL_INTERVAL_MS);
     };
     tick();
@@ -304,6 +352,7 @@ export default function Home() {
   }, [sessionId, phase]);
 
   async function handleReady(lat: number, lng: number) {
+    locationRef.current = { lat, lng };
     setMyLocation({ lat, lng });
     await join(sessionId, lat, lng);
     setPhase("live");
